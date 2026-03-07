@@ -54,6 +54,13 @@ const MODEL_PROVIDER_SETTINGS: Array<{
     placeholder: "your-codex-model-slug",
     example: "gpt-6.7-codex-ultra-preview",
   },
+  {
+    provider: "opencode",
+    title: "OpenCode",
+    description: "Save additional OpenCode model slugs for the picker and `/model` command.",
+    placeholder: "provider/model-id",
+    example: "openai/gpt-4.1",
+  },
 ] as const;
 
 function getCustomModelsForProvider(
@@ -63,9 +70,10 @@ function getCustomModelsForProvider(
   switch (provider) {
     case "codex":
       return settings.customCodexModels;
+    case "opencode":
+      return settings.customOpenCodeModels;
     case "claudeCode":
     case "cursor":
-    case "opencode":
       return [];
     default:
       return settings.customCodexModels;
@@ -79,9 +87,10 @@ function getDefaultCustomModelsForProvider(
   switch (provider) {
     case "codex":
       return defaults.customCodexModels;
+    case "opencode":
+      return defaults.customOpenCodeModels;
     case "claudeCode":
     case "cursor":
-    case "opencode":
       return [];
     default:
       return defaults.customCodexModels;
@@ -92,9 +101,10 @@ function patchCustomModels(provider: ProviderKind, models: string[]) {
   switch (provider) {
     case "codex":
       return { customCodexModels: models };
+    case "opencode":
+      return { customOpenCodeModels: models };
     case "claudeCode":
     case "cursor":
-    case "opencode":
       return {};
     default:
       return { customCodexModels: models };

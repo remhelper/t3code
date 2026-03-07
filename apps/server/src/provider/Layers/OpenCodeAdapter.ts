@@ -5,16 +5,22 @@
  *
  * @module OpenCodeAdapterLive
  */
+import { pathToFileURL } from "node:url";
+
 import {
   ProviderSession,
   type ProviderRuntimeEvent,
   ProviderApprovalDecision,
   RuntimeItemId,
+  RuntimeRequestId,
   ThreadId,
   TurnId,
   EventId,
 } from "@t3tools/contracts";
 import { Effect, Layer, Queue, Stream } from "effect";
+
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -27,6 +33,7 @@ import { OpenCodeAdapter, type OpenCodeAdapterShape } from "../Services/OpenCode
 const PROVIDER = "opencode" as const;
 const DEFAULT_BASE_URL = "http://127.0.0.1:4096";
 const DELTA_CHUNK_SIZE = 600;
+const SSE_RETRY_DELAY_MS = 2_000;
 
 function baseUrlFromEnv(): string {
   return process.env.OPENCODE_SERVER_URL?.trim() || DEFAULT_BASE_URL;
@@ -114,6 +121,28 @@ function extractAssistantText(payload: unknown): string {
   return "";
 }
 
+function resolveRequestType(type: string | undefined):
+  | "command_execution_approval"
+  | "file_read_approval"
+  | "file_change_approval"
+  | "unknown" {
+  if (!type) return "unknown";
+  const lower = type.toLowerCase();
+  if (lower.includes("read")) return "file_read_approval";
+  if (lower.includes("write") || lower.includes("edit") || lower.includes("patch")) {
+    return "file_change_approval";
+  }
+  if (lower.includes("command") || lower.includes("exec")) {
+    return "command_execution_approval";
+  }
+  return "unknown";
+}
+
+function resolveStreamKind(partType: string): "assistant_text" | "reasoning_text" {
+  return partType === "reasoning" ? "reasoning_text" : "assistant_text";
+}
+
+
 async function requestJson<T>(method: string, path: string, body?: unknown): Promise<T> {
   const baseUrl = baseUrlFromEnv();
   const url = new URL(path, baseUrl);
@@ -140,8 +169,245 @@ const makeOpenCodeAdapter = () =>
   Effect.gen(function* () {
     const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, ProviderSession & { opencodeSessionId: string }>();
+    const sessionIdToThreadId = new Map<string, ThreadId>();
+    const requestTypeById = new Map<string, "command_execution_approval" | "file_read_approval" | "file_change_approval" | "unknown">();
+    const serverConfig = yield* Effect.service(ServerConfig);
+    let streamReady = false;
+    const streamAbortController = new AbortController();
 
     const emit = (event: ProviderRuntimeEvent) => Queue.offer(queue, event);
+    const emitNow = (event: ProviderRuntimeEvent) => {
+      void Effect.runPromise(Queue.offer(queue, event));
+    };
+
+    const handleEvent = (payload: unknown) => {
+      if (!payload || typeof payload !== "object") return;
+      const record = payload as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : undefined;
+      const properties = record.properties && typeof record.properties === "object"
+        ? (record.properties as Record<string, unknown>)
+        : undefined;
+      const sessionId =
+        (properties?.sessionID as string | undefined) ||
+        (properties?.info && typeof properties.info === "object"
+          ? ((properties.info as Record<string, unknown>).sessionID as string | undefined)
+          : undefined) ||
+        (properties?.part && typeof properties.part === "object"
+          ? ((properties.part as Record<string, unknown>).sessionID as string | undefined)
+          : undefined);
+      if (!sessionId) return;
+      const threadId = sessionIdToThreadId.get(sessionId);
+      if (!threadId) return;
+
+      if (type === "session.status") {
+        const status = properties?.status && typeof properties.status === "object"
+          ? (properties.status as Record<string, unknown>)
+          : null;
+        const statusType = status?.type;
+        const state = statusType === "busy" ? "running" : statusType === "retry" ? "running" : "ready";
+        emitNow({
+          ...eventBase(threadId),
+          type: "session.state.changed",
+          payload: { state },
+        });
+        return;
+      }
+
+      if (type === "session.idle") {
+        emitNow({
+          ...eventBase(threadId),
+          type: "session.state.changed",
+          payload: { state: "ready" },
+        });
+        return;
+      }
+
+      if (type === "session.error") {
+        const error = properties?.error && typeof properties.error === "object"
+          ? (properties.error as Record<string, unknown>)
+          : undefined;
+        const message = (error?.message as string | undefined) || "OpenCode session error";
+        emitNow({
+          ...eventBase(threadId),
+          type: "runtime.error",
+          payload: { message, class: "provider_error" },
+        });
+        return;
+      }
+
+      if (type === "message.part.updated") {
+        const part = properties?.part && typeof properties.part === "object"
+          ? (properties.part as Record<string, unknown>)
+          : undefined;
+        if (!part) return;
+        const messageId = part.messageID as string | undefined;
+        if (!messageId) return;
+        const turnId = TurnId.makeUnsafe(messageId);
+        const itemId = RuntimeItemId.makeUnsafe(part.id as string ?? messageId);
+        const partType = part.type as string | undefined;
+        if (partType === "text" || partType === "reasoning") {
+          const delta =
+            (typeof properties?.delta === "string" ? properties.delta : undefined) ??
+            (typeof part.text === "string" ? part.text : "");
+          if (!delta) return;
+          emitNow({
+            ...eventBase(threadId, turnId),
+            itemId,
+            type: "content.delta",
+            payload: {
+              streamKind: resolveStreamKind(partType),
+              delta,
+            },
+          });
+          return;
+        }
+
+        if (partType === "tool") {
+          const state = part.state && typeof part.state === "object"
+            ? (part.state as Record<string, unknown>)
+            : undefined;
+          const status = state?.status as string | undefined;
+          emitNow({
+            ...eventBase(threadId, turnId),
+            itemId,
+            type: "item.updated",
+            payload: {
+              itemType: "dynamic_tool_call",
+              status:
+                status === "completed"
+                  ? "completed"
+                  : status === "error"
+                    ? "failed"
+                    : status === "running"
+                      ? "inProgress"
+                      : "inProgress",
+              detail: typeof state?.output === "string" ? state.output : undefined,
+            },
+          });
+        }
+        return;
+      }
+
+      if (type === "message.updated") {
+        const info = properties?.info && typeof properties.info === "object"
+          ? (properties.info as Record<string, unknown>)
+          : undefined;
+        if (!info || info.role !== "assistant") return;
+        const messageId = info.id as string | undefined;
+        if (!messageId) return;
+        const turnId = TurnId.makeUnsafe(messageId);
+        const itemId = RuntimeItemId.makeUnsafe(messageId);
+        emitNow({
+          ...eventBase(threadId, turnId),
+          itemId,
+          type: "item.completed",
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+          },
+        });
+        emitNow({
+          ...eventBase(threadId, turnId),
+          type: "turn.completed",
+          payload: { state: "completed" },
+        });
+        emitNow({
+          ...eventBase(threadId, turnId),
+          type: "session.state.changed",
+          payload: { state: "ready" },
+        });
+        return;
+      }
+
+      if (type === "permission.updated") {
+        const permission = properties ?? {};
+        const permissionId = permission.id as string | undefined;
+        if (!permissionId) return;
+        const requestType = resolveRequestType(permission.type as string | undefined);
+        requestTypeById.set(permissionId, requestType);
+        emitNow({
+          ...eventBase(threadId),
+          requestId: RuntimeRequestId.makeUnsafe(permissionId),
+          type: "request.opened",
+          payload: {
+            requestType,
+            detail: typeof permission.title === "string" ? permission.title : undefined,
+            args: permission.metadata,
+          },
+        });
+        return;
+      }
+
+      if (type === "permission.replied") {
+        const permissionId = properties?.permissionID as string | undefined;
+        if (!permissionId) return;
+        const requestType = requestTypeById.get(permissionId) ?? "unknown";
+        requestTypeById.delete(permissionId);
+        emitNow({
+          ...eventBase(threadId),
+          requestId: RuntimeRequestId.makeUnsafe(permissionId),
+          type: "request.resolved",
+          payload: { requestType, decision: String(properties?.response ?? "") },
+        });
+      }
+    };
+
+    const readSseOnce = async () => {
+      const decoder = new TextDecoder();
+      const baseUrl = baseUrlFromEnv();
+      const authHeader = buildAuthHeader();
+
+      const response = await fetch(new URL("/global/event", baseUrl), {
+        headers: authHeader ? { authorization: authHeader } : undefined,
+        signal: streamAbortController.signal,
+      });
+      if (!response.ok || !response.body) {
+        streamReady = false;
+        throw new Error("OpenCode SSE connection failed.");
+      }
+
+      streamReady = true;
+      const reader = response.body.getReader();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let boundaryIndex = buffer.indexOf("\n\n");
+        while (boundaryIndex !== -1) {
+          const rawEvent = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + 2);
+          const dataLines = rawEvent
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim());
+          const data = dataLines.join("\n").trim();
+          if (data) {
+            try {
+              handleEvent(JSON.parse(data));
+            } catch {
+              // ignore parse errors
+            }
+          }
+          boundaryIndex = buffer.indexOf("\n\n");
+        }
+      }
+    };
+
+    const startEventStream = Effect.forkDaemon(
+      Effect.gen(function* () {
+        while (true) {
+          yield* Effect.tryPromise({
+            try: () => readSseOnce(),
+            catch: () => undefined,
+          });
+          streamReady = false;
+          yield* Effect.sleep(SSE_RETRY_DELAY_MS);
+        }
+      }),
+    );
+    yield* startEventStream;
 
     const startSession: OpenCodeAdapterShape["startSession"] = (input) =>
       Effect.gen(function* () {
@@ -156,9 +422,10 @@ const makeOpenCodeAdapter = () =>
         }
 
         const response = yield* Effect.tryPromise({
-          try: () => requestJson<{ id?: string }>("POST", "/session", {
-            title: `Thread ${input.threadId}`,
-          }),
+          try: () =>
+            requestJson<{ id?: string }>("POST", "/session", {
+              title: `Thread ${input.threadId}`,
+            }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -193,6 +460,7 @@ const makeOpenCodeAdapter = () =>
           opencodeSessionId: sessionId,
         };
         sessions.set(input.threadId, session);
+        sessionIdToThreadId.set(sessionId, input.threadId);
 
         yield* emit({
           ...eventBase(input.threadId),
@@ -225,7 +493,8 @@ const makeOpenCodeAdapter = () =>
           );
         }
 
-        const turnId = TurnId.makeUnsafe(crypto.randomUUID());
+        const messageId = crypto.randomUUID();
+        const turnId = TurnId.makeUnsafe(messageId);
         const itemId = RuntimeItemId.makeUnsafe(crypto.randomUUID());
 
         yield* emit({
@@ -250,63 +519,100 @@ const makeOpenCodeAdapter = () =>
           },
         });
 
+        const parts: Array<Record<string, unknown>> = [{ type: "text", text: input.input ?? "" }];
+        if (Array.isArray(input.attachments)) {
+          for (const attachment of input.attachments) {
+            if (attachment.type !== "image") continue;
+            const resolvedPath = resolveAttachmentPath({
+              stateDir: serverConfig.stateDir,
+              attachment,
+            });
+            if (!resolvedPath) continue;
+            const fileUrl = pathToFileURL(resolvedPath).toString();
+            parts.push({
+              type: "file",
+              mime: attachment.mimeType,
+              filename: attachment.name,
+              url: fileUrl,
+            });
+          }
+        }
+
         const body = {
-          messageID: turnId,
+          messageID: messageId,
           ...(input.model ? { model: input.model } : {}),
-          parts: [{ type: "text", text: input.input ?? "" }],
+          parts,
         };
 
-        const response = yield* Effect.tryPromise({
-          try: () =>
-            requestJson<Record<string, unknown>>(
-              "POST",
-              `/session/${session.opencodeSessionId}/message`,
-              body,
-            ),
-          catch: (cause) =>
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "POST /session/:id/message",
-              detail: toMessage(cause, "Failed to send OpenCode message."),
-              cause,
-            }),
-        });
+        if (streamReady) {
+          yield* Effect.tryPromise({
+            try: () =>
+              requestJson(
+                "POST",
+                `/session/${session.opencodeSessionId}/prompt_async`,
+                body,
+              ),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "POST /session/:id/prompt_async",
+                detail: toMessage(cause, "Failed to send OpenCode message (async)."),
+                cause,
+              }),
+          });
+        } else {
+          const response = yield* Effect.tryPromise({
+            try: () =>
+              requestJson<Record<string, unknown>>(
+                "POST",
+                `/session/${session.opencodeSessionId}/message`,
+                body,
+              ),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "POST /session/:id/message",
+                detail: toMessage(cause, "Failed to send OpenCode message."),
+                cause,
+              }),
+          });
 
-        const assistantText = extractAssistantText(response);
-        for (const chunk of chunkText(assistantText, DELTA_CHUNK_SIZE)) {
+          const assistantText = extractAssistantText(response);
+          for (const chunk of chunkText(assistantText, DELTA_CHUNK_SIZE)) {
+            yield* emit({
+              ...eventBase(input.threadId, turnId),
+              itemId,
+              type: "content.delta",
+              payload: {
+                streamKind: "assistant_text",
+                delta: chunk,
+              },
+            });
+          }
+
           yield* emit({
             ...eventBase(input.threadId, turnId),
             itemId,
-            type: "content.delta",
+            type: "item.completed",
             payload: {
-              streamKind: "assistant_text",
-              delta: chunk,
+              itemType: "assistant_message",
+              status: "completed",
+              ...(assistantText ? { detail: assistantText } : {}),
             },
           });
+          yield* emit({
+            ...eventBase(input.threadId, turnId),
+            type: "turn.completed",
+            payload: {
+              state: "completed",
+            },
+          });
+          yield* emit({
+            ...eventBase(input.threadId, turnId),
+            type: "session.state.changed",
+            payload: { state: "ready" },
+          });
         }
-
-        yield* emit({
-          ...eventBase(input.threadId, turnId),
-          itemId,
-          type: "item.completed",
-          payload: {
-            itemType: "assistant_message",
-            status: "completed",
-            ...(assistantText ? { detail: assistantText } : {}),
-          },
-        });
-        yield* emit({
-          ...eventBase(input.threadId, turnId),
-          type: "turn.completed",
-          payload: {
-            state: "completed",
-          },
-        });
-        yield* emit({
-          ...eventBase(input.threadId, turnId),
-          type: "session.state.changed",
-          payload: { state: "ready" },
-        });
 
         return {
           threadId: input.threadId,
@@ -418,6 +724,7 @@ const makeOpenCodeAdapter = () =>
         });
 
         sessions.delete(threadId);
+        sessionIdToThreadId.delete(session.opencodeSessionId);
         yield* emit({
           ...eventBase(threadId),
           type: "session.exited",
@@ -454,6 +761,7 @@ const makeOpenCodeAdapter = () =>
         for (const threadId of sessions.keys()) {
           yield* stopSession(threadId).pipe(Effect.ignore);
         }
+        streamAbortController.abort();
         yield* Queue.shutdown(queue);
       });
 

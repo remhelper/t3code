@@ -778,7 +778,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
   );
-  const customModelsForSelectedProvider = settings.customCodexModels;
+  const customModelsForSelectedProvider =
+    selectedProvider === "opencode"
+      ? settings.customOpenCodeModels
+      : settings.customCodexModels;
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
     if (!draftModel) {
@@ -2997,10 +3000,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
+      const customModelsForProvider =
+        provider === "opencode" ? settings.customOpenCodeModels : settings.customCodexModels;
       setComposerDraftProvider(activeThread.id, provider);
       setComposerDraftModel(
         activeThread.id,
-        resolveAppModelSelection(provider, settings.customCodexModels, model),
+        resolveAppModelSelection(provider, customModelsForProvider, model),
       );
       scheduleComposerFocus();
     },
@@ -3011,6 +3016,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftModel,
       setComposerDraftProvider,
       settings.customCodexModels,
+      settings.customOpenCodeModels,
     ],
   );
   const onEffortSelect = useCallback(
@@ -5193,12 +5199,13 @@ const COMING_SOON_PROVIDER_OPTIONS = [
 
 function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
+  customOpenCodeModels: readonly string[];
 }): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
     claudeCode: [],
     cursor: [],
-    opencode: [],
+    opencode: getAppModelOptions("opencode", settings.customOpenCodeModels),
   };
 }
 
