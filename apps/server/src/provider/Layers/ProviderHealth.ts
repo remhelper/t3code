@@ -20,6 +20,8 @@ import { ProviderHealth, type ProviderHealthShape } from "../Services/ProviderHe
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const CODEX_PROVIDER = "codex" as const;
+const OPENCODE_PROVIDER = "opencode" as const;
+const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
 
 // ── Pure helpers ────────────────────────────────────────────────────
 
@@ -44,6 +46,18 @@ function isCommandMissingCause(error: unknown): boolean {
     lower.includes("enoent") ||
     lower.includes("notfound")
   );
+}
+
+function resolveOpenCodeBaseUrl(): string {
+  return process.env.OPENCODE_SERVER_URL?.trim() || DEFAULT_OPENCODE_BASE_URL;
+}
+
+function buildOpenCodeAuthHeader(): string | null {
+  const password = process.env.OPENCODE_SERVER_PASSWORD;
+  if (!password) return null;
+  const username = process.env.OPENCODE_SERVER_USERNAME || "opencode";
+  const token = Buffer.from(`${username}:${password}`).toString("base64");
+  return `Basic ${token}`;
 }
 
 function detailFromResult(
@@ -290,14 +304,85 @@ export const checkCodexProviderStatus: Effect.Effect<
   } satisfies ServerProviderStatus;
 });
 
+export const checkOpenCodeProviderStatus: Effect.Effect<ServerProviderStatus> = Effect.gen(
+  function* () {
+    const checkedAt = new Date().toISOString();
+    const baseUrl = resolveOpenCodeBaseUrl();
+    const authHeader = buildOpenCodeAuthHeader();
+
+    const result = yield* Effect.tryPromise({
+      try: async () => {
+        const response = await fetch(new URL("/global/health", baseUrl), {
+          headers: authHeader ? { authorization: authHeader } : undefined,
+        });
+        if (!response.ok) {
+          const detail = await response.text();
+          throw new Error(`HTTP ${response.status}: ${detail}`);
+        }
+        return response.json() as Promise<{ healthy?: boolean; version?: string }>;
+      },
+      catch: (cause) => cause,
+    }).pipe(Effect.result);
+
+    if (Result.isFailure(result)) {
+      const error = result.failure;
+      return {
+        provider: OPENCODE_PROVIDER,
+        status: "warning" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        checkedAt,
+        message:
+          error instanceof Error
+            ? `OpenCode server check failed: ${error.message}`
+            : "OpenCode server check failed.",
+      };
+    }
+
+    const healthy = result.success;
+    if (Option.isNone(healthy)) {
+      return {
+        provider: OPENCODE_PROVIDER,
+        status: "warning" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        checkedAt,
+        message: `OpenCode server check timed out (${baseUrl}).`,
+      };
+    }
+
+    const payload = healthy.value as { healthy?: boolean; version?: string } | undefined;
+    if (!payload || payload.healthy !== true) {
+      return {
+        provider: OPENCODE_PROVIDER,
+        status: "warning" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        checkedAt,
+        message: `OpenCode server is not healthy (${baseUrl}).`,
+      };
+    }
+
+    return {
+      provider: OPENCODE_PROVIDER,
+      status: "ready" as const,
+      available: true,
+      authStatus: "unknown" as const,
+      checkedAt,
+      message: payload.version ? `OpenCode server v${payload.version}.` : undefined,
+    } satisfies ServerProviderStatus;
+  },
+);
+
 // ── Layer ───────────────────────────────────────────────────────────
 
 export const ProviderHealthLive = Layer.effect(
   ProviderHealth,
   Effect.gen(function* () {
     const codexStatus = yield* checkCodexProviderStatus;
+    const opencodeStatus = yield* checkOpenCodeProviderStatus;
     return {
-      getStatuses: Effect.succeed([codexStatus]),
+      getStatuses: Effect.succeed([codexStatus, opencodeStatus]),
     } satisfies ProviderHealthShape;
   }),
 );

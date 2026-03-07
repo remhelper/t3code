@@ -20,7 +20,7 @@ export const PROVIDER_OPTIONS: Array<{
   { value: "codex", label: "Codex", available: true },
   { value: "claudeCode", label: "Claude Code", available: false },
   { value: "cursor", label: "Cursor", available: false },
-  { value: "opencode", label: "OpenCode", available: false },
+  { value: "opencode", label: "OpenCode", available: true },
 ];
 
 export interface WorkLogEntry {
