@@ -62,6 +62,11 @@ function getCustomModelsForProvider(
 ) {
   switch (provider) {
     case "codex":
+      return settings.customCodexModels;
+    case "claudeCode":
+    case "cursor":
+    case "opencode":
+      return [];
     default:
       return settings.customCodexModels;
   }
@@ -73,6 +78,11 @@ function getDefaultCustomModelsForProvider(
 ) {
   switch (provider) {
     case "codex":
+      return defaults.customCodexModels;
+    case "claudeCode":
+    case "cursor":
+    case "opencode":
+      return [];
     default:
       return defaults.customCodexModels;
   }
@@ -81,6 +91,11 @@ function getDefaultCustomModelsForProvider(
 function patchCustomModels(provider: ProviderKind, models: string[]) {
   switch (provider) {
     case "codex":
+      return { customCodexModels: models };
+    case "claudeCode":
+    case "cursor":
+    case "opencode":
+      return {};
     default:
       return { customCodexModels: models };
   }
@@ -96,6 +111,9 @@ function SettingsRouteView() {
     Record<ProviderKind, string>
   >({
     codex: "",
+    claudeCode: "",
+    cursor: "",
+    opencode: "",
   });
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>
