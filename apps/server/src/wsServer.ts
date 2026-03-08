@@ -13,6 +13,7 @@ import Mime from "@effect/platform-node/Mime";
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  MODEL_OPTIONS_BY_PROVIDER,
   type ClientOrchestrationCommand,
   type OrchestrationCommand,
   ORCHESTRATION_WS_CHANNELS,
@@ -840,6 +841,88 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           providers: providerStatuses,
           availableEditors,
         };
+
+      case WS_METHODS.serverGetProviderModels: {
+        const codexModels = MODEL_OPTIONS_BY_PROVIDER.codex.map((option) => ({
+          slug: option.slug,
+          name: option.name,
+        }));
+
+        const opencodeModels = yield* Effect.tryPromise({
+          try: async () => {
+            const baseUrl = process.env.OPENCODE_SERVER_URL?.trim() || "http://127.0.0.1:4096";
+            const password = process.env.OPENCODE_SERVER_PASSWORD;
+            const username = process.env.OPENCODE_SERVER_USERNAME || "opencode";
+            const headers: Record<string, string> = {};
+            if (password) {
+              headers.authorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+            }
+
+            const response = await fetch(new URL("/config/providers", baseUrl), { headers });
+            if (!response.ok) {
+              return [] as Array<{ slug: string; name: string }>;
+            }
+            const payload = (await response.json()) as Record<string, unknown>;
+            const providers = Array.isArray(payload.providers) ? payload.providers : [];
+            const models: Array<{ slug: string; name: string }> = [];
+            const seen = new Set<string>();
+
+            for (const entry of providers) {
+              if (!entry || typeof entry !== "object") continue;
+              const record = entry as Record<string, unknown>;
+              const providerId =
+                (record.id as string | undefined) ||
+                (record.providerID as string | undefined) ||
+                (record.name as string | undefined);
+              if (!providerId) continue;
+
+              const modelCandidates =
+                (record.models as unknown[] | undefined) ||
+                (record.modelIDs as unknown[] | undefined) ||
+                (record.modelIds as unknown[] | undefined) ||
+                (record.availableModels as unknown[] | undefined) ||
+                [];
+
+              for (const model of modelCandidates) {
+                if (typeof model === "string") {
+                  const slug = `${providerId}/${model}`;
+                  if (seen.has(slug)) continue;
+                  seen.add(slug);
+                  models.push({ slug, name: slug });
+                  continue;
+                }
+                if (!model || typeof model !== "object") continue;
+                const modelRecord = model as Record<string, unknown>;
+                const modelId =
+                  (modelRecord.id as string | undefined) ||
+                  (modelRecord.modelID as string | undefined) ||
+                  (modelRecord.name as string | undefined);
+                if (!modelId) continue;
+                const slug = `${providerId}/${modelId}`;
+                if (seen.has(slug)) continue;
+                seen.add(slug);
+                const displayName =
+                  (modelRecord.label as string | undefined) ||
+                  (modelRecord.name as string | undefined) ||
+                  slug;
+                models.push({ slug, name: displayName });
+              }
+            }
+
+            return models;
+          },
+          catch: () => [] as Array<{ slug: string; name: string }>,
+        });
+
+        return {
+          providers: [
+            { provider: "codex", models: codexModels },
+            { provider: "opencode", models: opencodeModels },
+            { provider: "claudeCode", models: [] },
+            { provider: "cursor", models: [] },
+          ],
+        };
+      }
 
       case WS_METHODS.serverUpsertKeybinding: {
         const body = stripRequestTag(request.body);

@@ -45,6 +45,23 @@ export type ServerProviderStatus = typeof ServerProviderStatus.Type;
 
 const ServerProviderStatuses = Schema.Array(ServerProviderStatus);
 
+export const ServerProviderModelOption = Schema.Struct({
+  slug: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+});
+export type ServerProviderModelOption = typeof ServerProviderModelOption.Type;
+
+export const ServerProviderModels = Schema.Struct({
+  provider: ProviderKind,
+  models: Schema.Array(ServerProviderModelOption),
+});
+export type ServerProviderModels = typeof ServerProviderModels.Type;
+
+export const ServerProviderModelsResult = Schema.Struct({
+  providers: Schema.Array(ServerProviderModels),
+});
+export type ServerProviderModelsResult = typeof ServerProviderModelsResult.Type;
+
 export const ServerConfig = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   keybindingsConfigPath: TrimmedNonEmptyString,
