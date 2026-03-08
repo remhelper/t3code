@@ -814,16 +814,14 @@ export default function ChatView({ threadId }: ChatViewProps) {
   }, [selectedCodexFastModeEnabled, selectedEffort, selectedProvider, supportsReasoningEffort]);
   const selectedModelForPicker = selectedModel;
   const providerModelsQuery = useQuery(serverProviderModelsQueryOptions());
-  const modelOptionsByProvider = useMemo(
-    () =>
-      getCustomModelOptionsByProvider(
-        settings,
-        providerModelsQuery.data?.providers.find((entry) => entry.provider === "opencode")
-          ?.models ??
-          [],
-      ),
-    [providerModelsQuery.data, settings],
-  );
+  const modelOptionsByProvider = useMemo(() => {
+    const opencodeModels =
+      providerModelsQuery.data?.providers.find((entry) => entry.provider === "opencode")
+        ?.models ??
+      [];
+    console.log("[OpenCode] provider models", opencodeModels);
+    return getCustomModelOptionsByProvider(settings, opencodeModels);
+  }, [providerModelsQuery.data, settings]);
   const selectedModelForPickerWithCustomFallback = useMemo(() => {
     const currentOptions = modelOptionsByProvider[selectedProvider];
     return currentOptions.some((option) => option.slug === selectedModelForPicker)
