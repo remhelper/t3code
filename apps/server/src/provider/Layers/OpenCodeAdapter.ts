@@ -395,7 +395,7 @@ const makeOpenCodeAdapter = () =>
       }
     };
 
-    const startEventStream = Effect.forkDaemon(
+    yield* Effect.forkScoped(
       Effect.gen(function* () {
         while (true) {
           yield* Effect.tryPromise({
@@ -407,7 +407,6 @@ const makeOpenCodeAdapter = () =>
         }
       }),
     );
-    yield* startEventStream;
 
     const startSession: OpenCodeAdapterShape["startSession"] = (input) =>
       Effect.gen(function* () {
