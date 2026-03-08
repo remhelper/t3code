@@ -5208,15 +5208,24 @@ const COMING_SOON_PROVIDER_OPTIONS = [
   { id: "gemini", label: "Gemini", icon: Gemini },
 ] as const;
 
-function getCustomModelOptionsByProvider(settings: {
-  customCodexModels: readonly string[];
-  customOpenCodeModels: readonly string[];
-}): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+function getCustomModelOptionsByProvider(
+  settings: {
+    customCodexModels: readonly string[];
+    customOpenCodeModels: readonly string[];
+  },
+  opencodeProviderModels: ReadonlyArray<{ slug: string; name: string }> = [],
+): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+  const opencodeOptions = getAppModelOptions("opencode", settings.customOpenCodeModels);
+  const opencodeOptionSlugs = new Set(opencodeOptions.map((option) => option.slug));
+  const mergedOpenCode = [...opencodeProviderModels]
+    .filter((option) => !opencodeOptionSlugs.has(option.slug))
+    .map((option) => ({ slug: option.slug, name: option.name }));
+
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
     claudeCode: [],
     cursor: [],
-    opencode: getAppModelOptions("opencode", settings.customOpenCodeModels),
+    opencode: [...mergedOpenCode, ...opencodeOptions],
   };
 }
 
