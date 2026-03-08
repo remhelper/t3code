@@ -813,12 +813,16 @@ export default function ChatView({ threadId }: ChatViewProps) {
     return Object.keys(codexOptions).length > 0 ? { codex: codexOptions } : undefined;
   }, [selectedCodexFastModeEnabled, selectedEffort, selectedProvider, supportsReasoningEffort]);
   const selectedModelForPicker = selectedModel;
-  const opencodeProviderModels =
-    providerModelsQuery.data?.providers.find((entry) => entry.provider === "opencode")?.models ??
-    [];
+  const providerModelsQuery = useQuery(serverProviderModelsQueryOptions());
   const modelOptionsByProvider = useMemo(
-    () => getCustomModelOptionsByProvider(settings, opencodeProviderModels),
-    [opencodeProviderModels, settings],
+    () =>
+      getCustomModelOptionsByProvider(
+        settings,
+        providerModelsQuery.data?.providers.find((entry) => entry.provider === "opencode")
+          ?.models ??
+          [],
+      ),
+    [providerModelsQuery.data, settings],
   );
   const selectedModelForPickerWithCustomFallback = useMemo(() => {
     const currentOptions = modelOptionsByProvider[selectedProvider];
@@ -1161,7 +1165,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const effectivePathQuery = pathTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const branchesQuery = useQuery(gitBranchesQueryOptions(gitCwd));
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
-  const providerModelsQuery = useQuery(serverProviderModelsQueryOptions());
   const workspaceEntriesQuery = useQuery(
     projectSearchEntriesQueryOptions({
       cwd: gitCwd,
